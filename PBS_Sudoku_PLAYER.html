@@ -1,0 +1,1040 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html-to-image/1.11.13/html-to-image.min.js" integrity="sha512-iZ2ORl595Wx6miw+GuadDet4WQbdSWS3JLMoNfY8cRGoEFy6oT3G9IbcrBeL6AfkgpA51ETt/faX6yLV+/gFJg==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+    <script>
+      (function() {
+        const originalConsole = window.console;
+        window.console = {
+          log: (...args) => {
+            originalConsole.log(...args);
+            window.parent.postMessage({ type: 'console', message: args.join(' ') }, '*');
+          },
+          error: (...args) => {
+            originalConsole.error(...args);
+            window.parent.postMessage({ type: 'console', message: 'Error: ' + args.join(' ') }, '*');
+          },
+          warn: (...args) => {
+            originalConsole.warn(...args);
+            window.parent.postMessage({ type: 'console', message: 'Warning: ' + args.join(' ') }, '*');
+          }
+        };
+
+        let requestId = 0;
+        let callbacksMap = new Map();
+        let streamControllers = new Map();
+        
+        window.claude = {
+          complete: (prompt) => {
+            return new Promise((resolve, reject) => {
+              const id = requestId++;
+              callbacksMap.set(id, { resolve, reject });
+              window.parent.postMessage({ type: 'claudeComplete', id, prompt }, '*');
+            });
+          }
+        };
+
+        window.storage = {
+          get: (key, shared = false) => {
+            return new Promise((resolve, reject) => {
+              const id = requestId++;
+              callbacksMap.set(id, { resolve, reject });
+              window.parent.postMessage({ type: 'storageGet', id, key, shared }, '*');
+            });
+          },
+          set: (key, value, shared = false) => {
+            return new Promise((resolve, reject) => {
+              const id = requestId++;
+              callbacksMap.set(id, { resolve, reject });
+              window.parent.postMessage({ type: 'storageSet', id, key, value, shared }, '*');
+            });
+          },
+          delete: (key, shared = false) => {
+            return new Promise((resolve, reject) => {
+              const id = requestId++;
+              callbacksMap.set(id, { resolve, reject });
+              window.parent.postMessage({ type: 'storageDelete', id, key, shared }, '*');
+            });
+          },
+          list: (prefix, shared = false) => {
+            return new Promise((resolve, reject) => {
+              const id = requestId++;
+              callbacksMap.set(id, { resolve, reject });
+              window.parent.postMessage({ type: 'storageList', id, prefix, shared }, '*');
+            });
+          }
+        };
+
+        let pendingBlobs = new Map();
+        URL.createObjectURL = (blob) => {
+          // Store the blob and create an ID and URL for it
+          const blobId = `blob-${Date.now()}-${Math.random()}`;
+          pendingBlobs.set(blobId, blob);
+          return `blob-request://${blobId}`;
+        };
+
+        URL.revokeObjectURL = (url) => {
+          // Remove the blob from our store
+          const blobId = url.replace("blob-request://", "");
+          pendingBlobs.delete(blobId);
+        };
+
+        const getBlobFromURL = (url) => {
+          const blobId = url.replace("blob-request://", "");
+          return pendingBlobs.get(blobId);
+        };
+
+        // Override global fetch with streaming support
+        window.fetch = (url, init = {}) => {
+          return new Promise((resolve, reject) => {
+            const id = requestId++;
+            const channelId = `fetch-${id}-${Date.now()}`;
+            
+            callbacksMap.set(id, { 
+              resolve: (response) => {
+                // Create a ReadableStream for the response body
+                const stream = new ReadableStream({
+                  start(controller) {
+                    streamControllers.set(channelId, controller);
+                  },
+                  cancel() {
+                    streamControllers.delete(channelId);
+                  }
+                });
+                
+                // Create and return the Response with the stream
+                resolve(new Response(stream, {
+                  status: response.status,
+                  statusText: response.statusText,
+                  headers: response.headers
+                }));
+              },
+              reject,
+              channelId
+            });
+            
+            window.parent.postMessage({
+              type: 'proxyFetch',
+              id,
+              url,
+              init,
+              channelId
+            }, '*');
+          });
+        };
+
+        window.addEventListener('message', async (event) => {
+          if (event.data.type === 'takeScreenshot') {
+            const rootElement = document.getElementById('artifacts-component-root-html');
+            if (!rootElement) {
+              window.parent.postMessage({
+                type: 'screenshotError',
+                error: new Error('Root element not found'),
+              }, '*');
+            }
+            const screenshot = await htmlToImage.toPng(rootElement, {
+              imagePlaceholder:
+                "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAAXNSR0IArs4c6QAAAA1JREFUGFdjePDgwX8ACOQDoNsk0PMAAAAASUVORK5CYII=",
+            });
+            window.parent.postMessage({
+              type: 'screenshotData',
+              data: screenshot,
+            }, '*');
+          } else if (event.data.type === 'claudeComplete') {
+            const callback = callbacksMap.get(event.data.id);
+            if (event.data.error) {
+              callback.reject(new Error(event.data.error));
+            } else {
+              callback.resolve(event.data.completion);
+            }
+            callbacksMap.delete(event.data.id);
+          } else if (event.data.type === 'proxyFetchResponse') {
+            const callback = callbacksMap.get(event.data.id);
+            if (event.data.error) {
+              callback.reject(new Error(event.data.error));
+              callbacksMap.delete(event.data.id);
+            } else {
+              // Initial response with headers, status, etc.
+              callback.resolve({
+                status: event.data.status,
+                statusText: event.data.statusText,
+                headers: event.data.headers
+              });
+              // Don't delete the callback yet if streaming
+              if (!event.data.body) {
+                callbacksMap.delete(event.data.id);
+              }
+            }
+          } else if (event.data.type === 'proxyFetchStream') {
+            // Handle streaming data chunks
+            const controller = streamControllers.get(event.data.channelId);
+            if (controller) {
+              if (event.data.error) {
+                controller.error(new Error(event.data.error));
+                streamControllers.delete(event.data.channelId);
+              } else if (event.data.done) {
+                controller.close();
+                streamControllers.delete(event.data.channelId);
+                // Clean up the callback
+                const callback = Array.from(callbacksMap.entries()).find(
+                  ([_, value]) => value.channelId === event.data.channelId
+                );
+                if (callback) {
+                  callbacksMap.delete(callback[0]);
+                }
+              } else if (event.data.chunk) {
+                controller.enqueue(new Uint8Array(event.data.chunk));
+              }
+            }
+          } else if (event.data.type === 'storageGet') {
+            const callback = callbacksMap.get(event.data.id);
+            if (event.data.error) {
+              callback.reject(new Error(event.data.error));
+            } else {
+              callback.resolve(event.data.result);
+            }
+            callbacksMap.delete(event.data.id);
+          } else if (event.data.type === 'storageSet') {
+            const callback = callbacksMap.get(event.data.id);
+            if (event.data.error) {
+              callback.reject(new Error(event.data.error));
+            } else {
+              callback.resolve(event.data.result);
+            }
+            callbacksMap.delete(event.data.id);
+          } else if (event.data.type === 'storageDelete') {
+            const callback = callbacksMap.get(event.data.id);
+            if (event.data.error) {
+              callback.reject(new Error(event.data.error));
+            } else {
+              callback.resolve(event.data.result);
+            }
+            callbacksMap.delete(event.data.id);
+          } else if (event.data.type === 'storageList') {
+            const callback = callbacksMap.get(event.data.id);
+            if (event.data.error) {
+              callback.reject(new Error(event.data.error));
+            } else {
+              callback.resolve(event.data.result);
+            }
+            callbacksMap.delete(event.data.id);
+          }
+        });
+
+        window.addEventListener('click', (event) => {
+          const isEl = event.target instanceof HTMLElement;
+          if (!isEl) return;
+    
+          // find ancestor links
+          const linkEl = event.target.closest("a");
+          if (!linkEl || !linkEl.href) return;
+    
+          event.preventDefault();
+          event.stopImmediatePropagation();
+    
+          if (linkEl.href.startsWith("blob-request:")) {
+            const blob = getBlobFromURL(linkEl.href);
+            if (!blob) return;
+            void blob.arrayBuffer().then((data) => {
+              window.parent.postMessage({
+                type: "downloadFile",
+                filename: linkEl.download,
+                data,
+                mimeType: blob.type || "application/octet-stream",
+              });
+            });
+          } else if (linkEl.href.startsWith("data:")) {
+            const [header, base64Data] = linkEl.href.split(",");
+            const mimeMatch = header.match(/data:([^;]+)/);
+            const mimeType = mimeMatch ? mimeMatch[1] : "application/octet-stream";
+            const binaryString = atob(base64Data);
+            const data = Uint8Array.from(binaryString, (c) =>
+              c.charCodeAt(0),
+            ).buffer;
+            window.parent.postMessage({
+              type: "downloadFile",
+              filename: linkEl.download,
+              data,
+              mimeType,
+            });
+          } else {
+            let linkUrl;
+            try {
+              linkUrl = new URL(linkEl.href);
+            } catch (error) {
+              return;
+            }
+    
+            if (linkUrl.hostname === window.location.hostname) return;
+      
+            window.parent.postMessage({
+              type: 'openExternal',
+              href: linkEl.href,
+            }, '*');
+          }
+      });
+
+        const originalOpen = window.open;
+        window.open = function (url) {
+          window.parent.postMessage({
+            type: "openExternal",
+            href: url,
+          }, "*");
+        };
+
+        window.addEventListener('error', (event) => {
+          window.parent.postMessage({ type: 'console', message: 'Uncaught Error: ' + event.message }, '*');
+        });
+      })();
+    </script>
+  
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Phi Beta Sigma — Sudoku Challenge</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: #f0f2f7;
+  font-family: Georgia, 'Times New Roman', Times, serif;
+  color: #111;
+  min-height: 100vh;
+}
+
+/* ── HEADER ─────────────────────────────────── */
+.hdr {
+  background: #003087;
+  position: relative;
+  overflow: hidden;
+}
+.hdr::before {
+  content:''; position:absolute; top:-40px; right:-40px;
+  width:220px; height:220px;
+  border:40px solid rgba(255,255,255,0.05); border-radius:50%;
+}
+.hdr::after {
+  content:''; position:absolute; bottom:-60px; left:-30px;
+  width:180px; height:180px;
+  border:30px solid rgba(255,255,255,0.04); border-radius:50%;
+}
+.hdr-inner {
+  max-width:880px; margin:0 auto;
+  padding:28px 24px 22px;
+  text-align:center; position:relative; z-index:2;
+}
+.hdr-greek {
+  font-family:Georgia,serif; font-size:3rem; font-weight:700;
+  color:#fff; letter-spacing:14px; margin-bottom:6px;
+}
+.hdr-name {
+  font-size:1rem; font-weight:700; color:rgba(255,255,255,.92);
+  letter-spacing:4px; text-transform:uppercase; margin-bottom:4px;
+}
+.hdr-tag {
+  font-family:Arial,Helvetica,sans-serif; font-size:.68rem;
+  color:#b3c8f0; letter-spacing:4px; text-transform:uppercase;
+}
+.hdr-rule {
+  width:60px; height:3px; background:rgba(255,255,255,.35);
+  margin:12px auto 0; border-radius:2px;
+}
+
+/* ── TITLE BAR ──────────────────────────────── */
+.title-bar {
+  background:#1a1a1a; text-align:center; padding:10px 20px;
+}
+.title-bar span {
+  font-family:Arial,Helvetica,sans-serif; font-size:.7rem;
+  font-weight:700; color:#fff; letter-spacing:5px; text-transform:uppercase;
+}
+.badge {
+  display:inline-block; background:#003087; color:#fff;
+  font-family:Arial,Helvetica,sans-serif; font-size:.58rem;
+  font-weight:700; letter-spacing:2px; text-transform:uppercase;
+  padding:3px 10px; margin-left:10px; border-radius:2px; vertical-align:middle;
+}
+
+/* ── PAGE ───────────────────────────────────── */
+.page { max-width:880px; margin:0 auto; padding:26px 20px 50px; }
+
+/* ── PLAYER FORM ────────────────────────────── */
+.player-card {
+  background:#fff; border:2px solid #003087;
+  border-radius:4px; padding:18px 20px; margin-bottom:22px;
+  box-shadow:3px 3px 0 #003087;
+}
+.player-card h2 {
+  font-family:Arial,Helvetica,sans-serif; font-size:.7rem;
+  font-weight:700; letter-spacing:3px; text-transform:uppercase;
+  color:#003087; margin-bottom:12px;
+  padding-bottom:8px; border-bottom:2px solid #eef1f8;
+}
+.form-row {
+  display:flex; gap:14px; flex-wrap:wrap;
+}
+.form-group {
+  flex:1 1 180px; display:flex; flex-direction:column; gap:4px;
+}
+.form-group label {
+  font-family:Arial,Helvetica,sans-serif; font-size:.65rem;
+  font-weight:700; letter-spacing:2px; text-transform:uppercase; color:#555;
+}
+.form-group input {
+  border:2px solid #ccc; border-radius:2px; padding:8px 10px;
+  font-family:Georgia,serif; font-size:.9rem; color:#111;
+  outline:none; transition:border-color .15s;
+}
+.form-group input:focus { border-color:#003087; }
+
+/* ── INSTRUCTIONS ───────────────────────────── */
+.note {
+  background:#fff; border-left:5px solid #003087;
+  padding:12px 16px; margin-bottom:22px;
+  font-family:Arial,Helvetica,sans-serif; font-size:.78rem;
+  color:#444; line-height:1.6; border-radius:0 3px 3px 0;
+}
+.note strong { color:#003087; }
+.note .warn {
+  display:inline-block; background:#fff3cd; border:1px solid #e6c200;
+  color:#7a5c00; padding:2px 8px; border-radius:2px;
+  font-size:.7rem; font-weight:700; letter-spacing:1px;
+}
+
+/* ── GAME LAYOUT ────────────────────────────── */
+.game-layout {
+  display:flex; gap:26px;
+  align-items:flex-start; justify-content:center; flex-wrap:wrap;
+}
+
+/* ── BOARD ──────────────────────────────────── */
+.board-card {
+  background:#fff; border:2px solid #1a1a1a;
+  border-radius:4px; padding:14px;
+  box-shadow:4px 4px 0 #003087;
+}
+.sudoku-table { border-collapse:collapse; border:3px solid #1a1a1a; }
+.sudoku-table td {
+  width:46px; height:46px; padding:0;
+  border:1px solid #aaa; position:relative;
+  text-align:center; vertical-align:middle;
+}
+.sudoku-table td.bl { border-left:3px solid #1a1a1a; }
+.sudoku-table td.bt { border-top:3px solid #1a1a1a; }
+.sudoku-table td.br { border-right:3px solid #1a1a1a; }
+.sudoku-table td.bb { border-bottom:3px solid #1a1a1a; }
+
+.sudoku-table td input {
+  width:100%; height:100%; border:none; outline:none;
+  background:transparent; text-align:center;
+  font-family:Georgia,serif; font-size:1.2rem; font-weight:700;
+  color:#003087; cursor:pointer; padding:0;
+  -moz-appearance:textfield;
+}
+.sudoku-table td input::-webkit-outer-spin-button,
+.sudoku-table td input::-webkit-inner-spin-button { -webkit-appearance:none; }
+
+.sudoku-table td.given { background:#eef1f8; }
+.sudoku-table td.given input { color:#111; cursor:default; pointer-events:none; }
+
+.sudoku-table td.hl  { background:#dde6f7; }
+.sudoku-table td.given.hl { background:#c8d5ef; }
+.sudoku-table td.ac  { background:#003087 !important; }
+.sudoku-table td.ac input { color:#fff !important; }
+.sudoku-table td.conf input { color:#b30000 !important; }
+
+/* ── SIDE PANEL ─────────────────────────────── */
+.side-panel { flex:0 0 auto; width:200px; }
+
+.panel-label {
+  font-family:Arial,Helvetica,sans-serif; font-size:.62rem;
+  font-weight:700; letter-spacing:3px; text-transform:uppercase;
+  color:#666; margin-bottom:7px; display:block;
+}
+
+/* Timer */
+.timer-box {
+  text-align:center; margin-bottom:16px;
+  background:#fff; border:2px solid #003087;
+  border-radius:3px; padding:10px 6px;
+}
+.timer-val {
+  font-family:Georgia,serif; font-size:1.7rem;
+  font-weight:700; color:#003087; letter-spacing:4px;
+}
+
+/* Difficulty */
+.diff-box { margin-bottom:16px; text-align:center; }
+.diff-pips { display:flex; justify-content:center; gap:5px; margin-top:4px; }
+.pip { width:24px; height:8px; border-radius:2px; border:2px solid #003087; }
+.pip.on { background:#003087; }
+
+/* Numpad */
+.numpad {
+  display:grid; grid-template-columns:repeat(3,1fr);
+  gap:5px; margin-bottom:8px;
+}
+.num-btn {
+  background:#fff; border:2px solid #003087; color:#003087;
+  font-family:Georgia,serif; font-size:1.25rem; font-weight:700;
+  height:50px; cursor:pointer; border-radius:2px;
+  transition:background .12s, color .12s;
+}
+.num-btn:hover, .num-btn.an { background:#003087; color:#fff; }
+.num-btn.done { border-color:#bbb; color:#bbb; }
+
+.erase-btn {
+  width:100%; background:#fff; border:2px solid #888; color:#555;
+  font-family:Arial,Helvetica,sans-serif; font-size:.68rem;
+  font-weight:700; letter-spacing:2px; text-transform:uppercase;
+  height:38px; cursor:pointer; border-radius:2px; margin-bottom:18px;
+  transition:background .12s;
+}
+.erase-btn:hover { background:#f0f0f0; }
+
+/* Action btns */
+.act-grp { display:flex; flex-direction:column; gap:8px; }
+.act-btn {
+  width:100%; padding:10px 8px;
+  font-family:Arial,Helvetica,sans-serif; font-size:.68rem;
+  font-weight:700; letter-spacing:2px; text-transform:uppercase;
+  border:2px solid; border-radius:2px; cursor:pointer;
+  transition:background .12s;
+}
+.btn-submit { background:#003087; color:#fff; border-color:#003087; }
+.btn-submit:hover { background:#0040b0; }
+.btn-clear  { background:#fff; color:#555; border-color:#888; }
+.btn-clear:hover  { background:#f5f5f5; }
+
+/* ── STATUS ─────────────────────────────────── */
+.status-area {
+  margin-top:14px; text-align:center; min-height:24px;
+}
+.status-msg {
+  font-family:Arial,Helvetica,sans-serif; font-size:.75rem;
+  font-weight:700; color:#003087; letter-spacing:1px;
+}
+.status-err {
+  font-family:Arial,Helvetica,sans-serif; font-size:.72rem;
+  font-weight:700; color:#b30000;
+}
+
+/* ── SUBMIT MODAL ───────────────────────────── */
+.modal-overlay {
+  display:none; position:fixed; inset:0;
+  background:rgba(0,0,0,.6); z-index:1000;
+  align-items:center; justify-content:center;
+}
+.modal-overlay.open { display:flex; }
+.modal {
+  background:#fff; border:3px solid #003087;
+  border-radius:4px; padding:32px 28px;
+  max-width:420px; width:90%; text-align:center;
+  box-shadow:6px 6px 0 #003087;
+}
+.modal h3 {
+  font-family:Georgia,serif; font-size:1.2rem; color:#003087;
+  margin-bottom:10px;
+}
+.modal p {
+  font-family:Arial,Helvetica,sans-serif; font-size:.8rem;
+  color:#444; line-height:1.6; margin-bottom:20px;
+}
+.modal-score {
+  font-family:Georgia,serif; font-size:2rem; font-weight:700;
+  color:#003087; margin-bottom:6px;
+}
+.modal-detail {
+  font-family:Arial,Helvetica,sans-serif; font-size:.75rem;
+  color:#666; margin-bottom:22px; line-height:1.5;
+}
+.modal-btns { display:flex; gap:10px; justify-content:center; flex-wrap:wrap; }
+.modal-btn {
+  padding:10px 24px;
+  font-family:Arial,Helvetica,sans-serif; font-size:.68rem;
+  font-weight:700; letter-spacing:2px; text-transform:uppercase;
+  border:2px solid; border-radius:2px; cursor:pointer;
+}
+.modal-dl  { background:#003087; color:#fff; border-color:#003087; }
+.modal-dl:hover { background:#0040b0; }
+.modal-cls { background:#fff; color:#555; border-color:#888; }
+.modal-cls:hover { background:#f5f5f5; }
+
+/* ── DOWNLOAD BAR ───────────────────────────── */
+.dl-bar {
+  background:#1a1a1a; text-align:center; padding:20px;
+}
+.dl-bar p {
+  font-family:Arial,Helvetica,sans-serif; font-size:.73rem;
+  color:#aaa; margin-bottom:10px;
+}
+.dl-btn {
+  background:#003087; color:#fff;
+  font-family:Arial,Helvetica,sans-serif; font-size:.7rem;
+  font-weight:700; letter-spacing:3px; text-transform:uppercase;
+  padding:11px 30px; border:none; cursor:pointer; border-radius:2px;
+  transition:background .15s;
+}
+.dl-btn:hover { background:#0040b0; }
+
+/* ── FOOTER ─────────────────────────────────── */
+.site-footer {
+  background:#003087; text-align:center; padding:14px 20px;
+}
+.site-footer p {
+  font-family:Arial,Helvetica,sans-serif; font-size:.62rem;
+  color:rgba(255,255,255,.5); letter-spacing:3px; text-transform:uppercase;
+}
+
+@media (max-width:600px) {
+  .sudoku-table td { width:34px; height:34px; }
+  .sudoku-table td input { font-size:.95rem; }
+  .side-panel { width:100%; }
+  .numpad { grid-template-columns:repeat(5,1fr); }
+}
+@media print {
+  .dl-bar,.side-panel,.player-card,.modal-overlay { display:none; }
+}
+</style>
+</head>
+<body id="artifacts-component-root-html">
+
+<!-- HEADER -->
+<header class="hdr">
+  <div class="hdr-inner">
+    <div class="hdr-greek">Φ Β Σ</div>
+    <div class="hdr-name">Phi Beta Sigma Fraternity, Inc.</div>
+    <div class="hdr-tag">Brotherhood · Scholarship · Service</div>
+    <div class="hdr-rule"></div>
+  </div>
+</header>
+<div class="title-bar">
+  <span>Sudoku Challenge</span>
+  <span class="badge">Medium</span>
+</div>
+
+<!-- PAGE -->
+<div class="page">
+
+  <!-- Player Info -->
+  <div class="player-card">
+    <h2>✎ Player Information — Required Before Submitting</h2>
+    <div class="form-row">
+      <div class="form-group">
+        <label>First Name</label>
+        <input type="text" id="firstName" placeholder="e.g. James" autocomplete="given-name">
+      </div>
+      <div class="form-group">
+        <label>Last Name</label>
+        <input type="text" id="lastName" placeholder="e.g. Brown" autocomplete="family-name">
+      </div>
+      <div class="form-group">
+        <label>Email Address</label>
+        <input type="email" id="email" placeholder="e.g. jbrown@email.com" autocomplete="email">
+      </div>
+      <div class="form-group">
+        <label>Chapter (optional)</label>
+        <input type="text" id="chapter" placeholder="e.g. Alpha Chapter">
+      </div>
+    </div>
+  </div>
+
+  <!-- Instructions -->
+  <div class="note">
+    <strong>How to Play:</strong> Fill every row, column, and 3×3 box with digits 1–9
+    with no repeats. Click a cell then use the number pad or type directly.
+    Grey cells are given and cannot be changed. When finished, press
+    <strong>Submit &amp; Score</strong> — your results will be recorded.
+    <br><br>
+    <span class="warn">🔒 SECURE</span>&nbsp;
+    Answers are not visible in this puzzle. Submit to find out how you did!
+  </div>
+
+  <!-- Game -->
+  <div class="game-layout">
+
+    <div class="board-wrap">
+      <div class="board-card">
+        <table class="sudoku-table" id="board"><tbody id="tbody"><tr><td class="bl bt ac" data-r="0" data-c="0"><input type="tel" maxlength="1" autocomplete="off"></td><td class="bt given hl" data-r="0" data-c="1"><input type="tel" maxlength="1" readonly="" autocomplete="off" tabindex="-1"></td><td class="bt given hl" data-r="0" data-c="2"><input type="tel" maxlength="1" readonly="" autocomplete="off" tabindex="-1"></td><td class="bl bt hl" data-r="0" data-c="3"><input type="tel" maxlength="1" autocomplete="off"></td><td class="bt hl" data-r="0" data-c="4"><input type="tel" maxlength="1" autocomplete="off"></td><td class="bt given hl" data-r="0" data-c="5"><input type="tel" maxlength="1" readonly="" autocomplete="off" tabindex="-1"></td><td class="bl bt hl" data-r="0" data-c="6"><input type="tel" maxlength="1" autocomplete="off"></td><td class="bt given hl" data-r="0" data-c="7"><input type="tel" maxlength="1" readonly="" autocomplete="off" tabindex="-1"></td><td class="bt br hl" data-r="0" data-c="8"><input type="tel" maxlength="1" autocomplete="off"></td></tr><tr><td class="bl given hl" data-r="1" data-c="0"><input type="tel" maxlength="1" readonly="" autocomplete="off" tabindex="-1"></td><td class="given hl" data-r="1" data-c="1"><input type="tel" maxlength="1" readonly="" autocomplete="off" tabindex="-1"></td><td class="hl" data-r="1" data-c="2"><input type="tel" maxlength="1" autocomplete="off"></td><td class="bl" data-r="1" data-c="3"><input type="tel" maxlength="1" autocomplete="off"></td><td class="" data-r="1" data-c="4"><input type="tel" maxlength="1" autocomplete="off"></td><td class="given" data-r="1" data-c="5"><input type="tel" maxlength="1" readonly="" autocomplete="off" tabindex="-1"></td><td class="bl given" data-r="1" data-c="6"><input type="tel" maxlength="1" readonly="" autocomplete="off" tabindex="-1"></td><td class="given" data-r="1" data-c="7"><input type="tel" maxlength="1" readonly="" autocomplete="off" tabindex="-1"></td><td class="br" data-r="1" data-c="8"><input type="tel" maxlength="1" autocomplete="off"></td></tr><tr><td class="bl given hl" data-r="2" data-c="0"><input type="tel" maxlength="1" readonly="" autocomplete="off" tabindex="-1"></td><td class="hl" data-r="2" data-c="1"><input type="tel" maxlength="1" autocomplete="off"></td><td class="given hl" data-r="2" data-c="2"><input type="tel" maxlength="1" readonly="" autocomplete="off" tabindex="-1"></td><td class="bl given" data-r="2" data-c="3"><input type="tel" maxlength="1" readonly="" autocomplete="off" tabindex="-1"></td><td class="" data-r="2" data-c="4"><input type="tel" maxlength="1" autocomplete="off"></td><td class="" data-r="2" data-c="5"><input type="tel" maxlength="1" autocomplete="off"></td><td class="bl" data-r="2" data-c="6"><input type="tel" maxlength="1" autocomplete="off"></td><td class="" data-r="2" data-c="7"><input type="tel" maxlength="1" autocomplete="off"></td><td class="br" data-r="2" data-c="8"><input type="tel" maxlength="1" autocomplete="off"></td></tr><tr><td class="bl bt given hl" data-r="3" data-c="0"><input type="tel" maxlength="1" readonly="" autocomplete="off" tabindex="-1"></td><td class="bt given" data-r="3" data-c="1"><input type="tel" maxlength="1" readonly="" autocomplete="off" tabindex="-1"></td><td class="bt" data-r="3" data-c="2"><input type="tel" maxlength="1" autocomplete="off"></td><td class="bl bt" data-r="3" data-c="3"><input type="tel" maxlength="1" autocomplete="off"></td><td class="bt" data-r="3" data-c="4"><input type="tel" maxlength="1" autocomplete="off"></td><td class="bt" data-r="3" data-c="5"><input type="tel" maxlength="1" autocomplete="off"></td><td class="bl bt" data-r="3" data-c="6"><input type="tel" maxlength="1" autocomplete="off"></td><td class="bt given" data-r="3" data-c="7"><input type="tel" maxlength="1" readonly="" autocomplete="off" tabindex="-1"></td><td class="bt br" data-r="3" data-c="8"><input type="tel" maxlength="1" autocomplete="off"></td></tr><tr><td class="bl given hl" data-r="4" data-c="0"><input type="tel" maxlength="1" readonly="" autocomplete="off" tabindex="-1"></td><td class="given" data-r="4" data-c="1"><input type="tel" maxlength="1" readonly="" autocomplete="off" tabindex="-1"></td><td class="given" data-r="4" data-c="2"><input type="tel" maxlength="1" readonly="" autocomplete="off" tabindex="-1"></td><td class="bl given" data-r="4" data-c="3"><input type="tel" maxlength="1" readonly="" autocomplete="off" tabindex="-1"></td><td class="" data-r="4" data-c="4"><input type="tel" maxlength="1" autocomplete="off"></td><td class="" data-r="4" data-c="5"><input type="tel" maxlength="1" autocomplete="off"></td><td class="bl" data-r="4" data-c="6"><input type="tel" maxlength="1" autocomplete="off"></td><td class="given" data-r="4" data-c="7"><input type="tel" maxlength="1" readonly="" autocomplete="off" tabindex="-1"></td><td class="br" data-r="4" data-c="8"><input type="tel" maxlength="1" autocomplete="off"></td></tr><tr><td class="bl hl" data-r="5" data-c="0"><input type="tel" maxlength="1" autocomplete="off"></td><td class="" data-r="5" data-c="1"><input type="tel" maxlength="1" autocomplete="off"></td><td class="given" data-r="5" data-c="2"><input type="tel" maxlength="1" readonly="" autocomplete="off" tabindex="-1"></td><td class="bl" data-r="5" data-c="3"><input type="tel" maxlength="1" autocomplete="off"></td><td class="" data-r="5" data-c="4"><input type="tel" maxlength="1" autocomplete="off"></td><td class="" data-r="5" data-c="5"><input type="tel" maxlength="1" autocomplete="off"></td><td class="bl given" data-r="5" data-c="6"><input type="tel" maxlength="1" readonly="" autocomplete="off" tabindex="-1"></td><td class="" data-r="5" data-c="7"><input type="tel" maxlength="1" autocomplete="off"></td><td class="br" data-r="5" data-c="8"><input type="tel" maxlength="1" autocomplete="off"></td></tr><tr><td class="bl bt given hl" data-r="6" data-c="0"><input type="tel" maxlength="1" readonly="" autocomplete="off" tabindex="-1"></td><td class="bt" data-r="6" data-c="1"><input type="tel" maxlength="1" autocomplete="off"></td><td class="bt given" data-r="6" data-c="2"><input type="tel" maxlength="1" readonly="" autocomplete="off" tabindex="-1"></td><td class="bl bt" data-r="6" data-c="3"><input type="tel" maxlength="1" autocomplete="off"></td><td class="bt given" data-r="6" data-c="4"><input type="tel" maxlength="1" readonly="" autocomplete="off" tabindex="-1"></td><td class="bt given" data-r="6" data-c="5"><input type="tel" maxlength="1" readonly="" autocomplete="off" tabindex="-1"></td><td class="bl bt" data-r="6" data-c="6"><input type="tel" maxlength="1" autocomplete="off"></td><td class="bt" data-r="6" data-c="7"><input type="tel" maxlength="1" autocomplete="off"></td><td class="bt br given" data-r="6" data-c="8"><input type="tel" maxlength="1" readonly="" autocomplete="off" tabindex="-1"></td></tr><tr><td class="bl given hl" data-r="7" data-c="0"><input type="tel" maxlength="1" readonly="" autocomplete="off" tabindex="-1"></td><td class="given" data-r="7" data-c="1"><input type="tel" maxlength="1" readonly="" autocomplete="off" tabindex="-1"></td><td class="" data-r="7" data-c="2"><input type="tel" maxlength="1" autocomplete="off"></td><td class="bl given" data-r="7" data-c="3"><input type="tel" maxlength="1" readonly="" autocomplete="off" tabindex="-1"></td><td class="" data-r="7" data-c="4"><input type="tel" maxlength="1" autocomplete="off"></td><td class="" data-r="7" data-c="5"><input type="tel" maxlength="1" autocomplete="off"></td><td class="bl given" data-r="7" data-c="6"><input type="tel" maxlength="1" readonly="" autocomplete="off" tabindex="-1"></td><td class="" data-r="7" data-c="7"><input type="tel" maxlength="1" autocomplete="off"></td><td class="br" data-r="7" data-c="8"><input type="tel" maxlength="1" autocomplete="off"></td></tr><tr><td class="bl bb given hl" data-r="8" data-c="0"><input type="tel" maxlength="1" readonly="" autocomplete="off" tabindex="-1"></td><td class="bb given" data-r="8" data-c="1"><input type="tel" maxlength="1" readonly="" autocomplete="off" tabindex="-1"></td><td class="bb given" data-r="8" data-c="2"><input type="tel" maxlength="1" readonly="" autocomplete="off" tabindex="-1"></td><td class="bl bb" data-r="8" data-c="3"><input type="tel" maxlength="1" autocomplete="off"></td><td class="bb" data-r="8" data-c="4"><input type="tel" maxlength="1" autocomplete="off"></td><td class="bb" data-r="8" data-c="5"><input type="tel" maxlength="1" autocomplete="off"></td><td class="bl bb" data-r="8" data-c="6"><input type="tel" maxlength="1" autocomplete="off"></td><td class="bb" data-r="8" data-c="7"><input type="tel" maxlength="1" autocomplete="off"></td><td class="br bb given" data-r="8" data-c="8"><input type="tel" maxlength="1" readonly="" autocomplete="off" tabindex="-1"></td></tr></tbody></table>
+      </div>
+      <div class="status-area">
+        <div class="status-msg" id="status-msg"></div>
+        <div class="status-err" id="status-err"></div>
+      </div>
+    </div>
+
+    <div class="side-panel">
+
+      <div class="timer-box">
+        <span class="panel-label" style="margin-bottom:4px">Elapsed Time</span>
+        <div class="timer-val" id="timer">0:15</div>
+      </div>
+
+      <div class="diff-box">
+        <span class="panel-label">Difficulty</span>
+        <div class="diff-pips">
+          <div class="pip on"></div><div class="pip on"></div>
+          <div class="pip on"></div><div class="pip"></div><div class="pip"></div>
+        </div>
+      </div>
+
+      <span class="panel-label">Select Number</span>
+      <div class="numpad" id="numpad"><button class="num-btn" data-n="1">1</button><button class="num-btn" data-n="2">2</button><button class="num-btn" data-n="3">3</button><button class="num-btn" data-n="4">4</button><button class="num-btn" data-n="5">5</button><button class="num-btn" data-n="6">6</button><button class="num-btn" data-n="7">7</button><button class="num-btn" data-n="8">8</button><button class="num-btn" data-n="9">9</button></div>
+      <button class="erase-btn" onclick="eraseCell()">⌫ Erase</button>
+
+      <div class="act-grp">
+        <span class="panel-label">Actions</span>
+        <button class="act-btn btn-submit" onclick="openSubmit()">➤ Submit &amp; Score</button>
+        <button class="act-btn btn-clear" onclick="clearPuzzle()">↻ Clear All</button>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<!-- DOWNLOAD BAR -->
+<div class="dl-bar">
+  <p>Share this puzzle file with chapter members via Constant Contact.</p>
+  <button class="dl-btn" onclick="downloadPlayer()">⭳ Download Player File</button>
+</div>
+
+<footer class="site-footer">
+  <p>Founded January 9, 1914 • Howard University • Washington, D.C. • ΦβΣ 1914</p>
+</footer>
+
+<!-- SUBMIT MODAL -->
+<div class="modal-overlay" id="modal">
+  <div class="modal">
+    <h3 id="modal-title">🏆 Puzzle Submitted</h3>
+    <div class="modal-score" id="modal-score"></div>
+    <div class="modal-detail" id="modal-detail"></div>
+    <p id="modal-msg"></p>
+    <div class="modal-btns">
+      <button class="modal-btn modal-dl" id="modal-dl-btn" onclick="downloadResult()">
+        ⭳ Download My Result
+      </button>
+      <button class="modal-btn modal-cls" onclick="closeModal()">Continue Playing</button>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ══════════════════════════════════════════════════════════════════
+   PUZZLE DATA
+   Answers are stored ONLY as SHA-256 hashes — never in plain text.
+   Even viewing page source will not reveal the solution.
+══════════════════════════════════════════════════════════════════ */
+const PUZZLE = [
+  [0,8,3,0,0,7,0,6,0],
+  [9,1,0,0,0,2,7,4,0],
+  [2,0,7,1,0,0,0,0,0],
+  [1,9,0,0,0,0,0,3,0],
+  [6,5,2,8,0,0,0,7,0],
+  [0,0,4,0,0,0,5,0,0],
+  [5,0,1,0,4,6,0,0,7],
+  [8,4,0,7,0,0,3,0,0],
+  [7,2,9,0,0,0,0,0,6],
+];
+
+/* SHA-256 hashes of "PBS-SIGMA-{row}-{col}-{answer}-1914"
+   (first 16 hex chars of SHA-256).
+   The solution is NEVER stored in plaintext — only these hashes. */
+const CELL_HASHES = [
+  ["9aba036b4201c623","ffad4d1bea4b251e","8c6a9d358409a39f","bd1166a4be55ff8c","9bc28f01285f2440","283ae17f854af56f","62a321e10bf76bfb","46459a9cdcca2828","bd7e192759edea98"],
+  ["7d03914af4517fc4","0b95d55e71950342","0b5dd78b31af76af","52f8cdee20a6ca46","22cfc05b41dacc9e","4ab312c98b224e7a","2ac954ea7629557c","26e352ec8d56f21b","efbe2a4729be01f6"],
+  ["906de79f5870b850","64c2cd0c773680b6","e017bd87e86b5926","a9e3be0e42195ba9","d438bb67776f79f4","00b0f96c040f9365","4f4dfbb7ebb9831e","d8af646e8fdceacf","201fd7370b0d3933"],
+  ["42755711b10d06d2","bd398d81d02f35f9","a81ad8425ddb3aa2","25878c6acb637e08","c6297c0df1a5e862","dbd82a79cafabeba","1c1acbd092c52f0e","04f90b8fb6717bf6","46fe0525df9d2878"],
+  ["a9df8d2e95fe9757","04d03c2b2d6240e8","9839b13e1c5de295","62ed47fdc675955b","f91ef6953c865400","3d018e3aa62ad221","6e3a0c9e41f8cb69","3c9f61d1e932d254","0b07adaf51c41273"],
+  ["b0e5222288362953","95796fc9cf784ba2","d0c10d3d80ec7ff5","64d4764f8f80f8ad","0f8c5736fda6e30d","7917c127d75bc0d5","70100e819a7e461a","dc2f51c1e806e5f0","25459946815b1414"],
+  ["0a786225d15ca736","116f3d3baeac9278","467fc7220b676888","74607c4ecbb06264","3d765fe4a8b833c7","0f25b140632e5633","ab4d5888c1fd9e17","f9504c6d2f005f80","edc80bd10388a336"],
+  ["63c1fff4879a8686","41192659272fd6ab","833bb13294e403a6","13a740844cb7b0a4","ff3b3e778d87d7ce","830b796256430e27","32a7356681a2472b","1e74cab995dbb51f","cc20876e81d6f041"],
+  ["aa99dff35b99f79c","2e1d50aecb4797ea","3cdddf40f18c294e","48f62a8cdfddfd71","ef551c0d971f199f","08411d3538910b86","3240e7adef49838c","017978f111408323","34c0e846ad4e9688"]
+];
+
+const ROWS = 9, COLS = 9;
+
+/* ── SHA-256 in browser (SubtleCrypto) ──────────────────────────── */
+async function sha256hex(msg) {
+  const enc  = new TextEncoder().encode(msg);
+  const buf  = await crypto.subtle.digest('SHA-256', enc);
+  return Array.from(new Uint8Array(buf))
+    .map(b => b.toString(16).padStart(2,'0')).join('');
+}
+
+async function verifyCell(r, c, val) {
+  if (!val || val < 1 || val > 9) return false;
+  const token = `PBS-SIGMA-${r}-${c}-${val}-1914`;
+  const full  = await sha256hex(token);
+  return full.slice(0, 16) === CELL_HASHES[r][c];
+}
+
+/* ── Board state ────────────────────────────────────────────────── */
+let selR = -1, selC = -1;
+let timerSec = 0, timerOn = true;
+let resultData = null;
+
+/* ── Build board ────────────────────────────────────────────────── */
+const tbody = document.getElementById('tbody');
+
+(function build() {
+  for (let r = 0; r < 9; r++) {
+    const tr = document.createElement('tr');
+    for (let c = 0; c < 9; c++) {
+      const td  = document.createElement('td');
+      const cls = [];
+      if (c % 3 === 0) cls.push('bl');
+      if (r % 3 === 0) cls.push('bt');
+      if (c === 8)     cls.push('br');
+      if (r === 8)     cls.push('bb');
+      const given = PUZZLE[r][c] !== 0;
+      if (given) cls.push('given');
+      td.className = cls.join(' ');
+      td.dataset.r = r; td.dataset.c = c;
+
+      const inp = document.createElement('input');
+      inp.type = 'tel'; inp.maxLength = 1;
+      inp.readOnly = given; inp.autocomplete = 'off';
+      if (given) { inp.value = PUZZLE[r][c]; inp.tabIndex = -1; }
+      inp.addEventListener('focus',   () => select(r, c));
+      inp.addEventListener('keydown', onKey);
+      inp.addEventListener('input',   onInput);
+      td.appendChild(inp);
+      td.addEventListener('click', () => { inp.focus(); select(r, c); });
+      tr.appendChild(td);
+    }
+    tbody.appendChild(tr);
+  }
+})();
+
+function cell(r,c){ return tbody.querySelector(`td[data-r="${r}"][data-c="${c}"]`); }
+function inp(r,c) { return cell(r,c)?.querySelector('input'); }
+
+/* ── Selection & highlights ─────────────────────────────────────── */
+function select(r, c) {
+  selR = r; selC = c;
+  const br = Math.floor(r/3)*3, bc = Math.floor(c/3)*3;
+  const v  = inp(r,c)?.value;
+  for (let i=0;i<9;i++) for (let j=0;j<9;j++) {
+    const td = cell(i,j); if (!td) continue;
+    td.classList.remove('hl','ac');
+    if (i===r && j===c) td.classList.add('ac');
+    else if (i===r || j===c || (i>=br&&i<br+3&&j>=bc&&j<bc+3))
+      td.classList.add('hl');
+  }
+  if (v) for (let i=0;i<9;i++) for (let j=0;j<9;j++) {
+    if (i===r&&j===c) continue;
+    if (inp(i,j)?.value===v) cell(i,j)?.classList.add('hl');
+  }
+  updatePad();
+}
+
+/* ── Keyboard ───────────────────────────────────────────────────── */
+function onKey(e) {
+  const r=+e.target.closest('td').dataset.r, c=+e.target.closest('td').dataset.c;
+  if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.key)) {
+    e.preventDefault();
+    let nr=r,nc=c;
+    if(e.key==='ArrowUp')    nr=Math.max(0,r-1);
+    if(e.key==='ArrowDown')  nr=Math.min(8,r+1);
+    if(e.key==='ArrowLeft')  nc=Math.max(0,c-1);
+    if(e.key==='ArrowRight') nc=Math.min(8,c+1);
+    inp(nr,nc)?.focus(); select(nr,nc); return;
+  }
+  if (e.key==='Backspace'||e.key==='Delete') { e.preventDefault(); eraseCell(); return; }
+  if (e.key>='1'&&e.key<='9') { e.preventDefault(); place(r,c,e.key); }
+}
+function onInput(e) {
+  const r=+e.target.closest('td').dataset.r, c=+e.target.closest('td').dataset.c;
+  const v=e.target.value.replace(/[^1-9]/g,'').slice(-1);
+  e.target.value=''; if(v) place(r,c,v);
+}
+
+/* ── Place / erase ──────────────────────────────────────────────── */
+function place(r,c,n) {
+  const td=cell(r,c), i=inp(r,c);
+  if (!td||!i||td.classList.contains('given')) return;
+  i.value=n;
+  checkConflicts(); select(r,c);
+  document.getElementById('status-msg').textContent='';
+}
+function eraseCell() {
+  if (selR<0||selC<0) return;
+  const td=cell(selR,selC), i=inp(selR,selC);
+  if (!td||!i||td.classList.contains('given')) return;
+  i.value=''; td.classList.remove('conf');
+  checkConflicts(); select(selR,selC);
+}
+
+/* ── Conflict check ─────────────────────────────────────────────── */
+function checkConflicts() {
+  for(let i=0;i<9;i++) for(let j=0;j<9;j++) cell(i,j)?.classList.remove('conf');
+  for(let i=0;i<9;i++) for(let j=0;j<9;j++) {
+    const v=inp(i,j)?.value; if(!v) continue;
+    for(let k=0;k<9;k++) {
+      if(k!==j&&inp(i,k)?.value===v){cell(i,j)?.classList.add('conf');cell(i,k)?.classList.add('conf');}
+      if(k!==i&&inp(k,j)?.value===v){cell(i,j)?.classList.add('conf');cell(k,j)?.classList.add('conf');}
+    }
+    const br=Math.floor(i/3)*3,bc=Math.floor(j/3)*3;
+    for(let r2=br;r2<br+3;r2++) for(let c2=bc;c2<bc+3;c2++) {
+      if(r2===i&&c2===j) continue;
+      if(inp(r2,c2)?.value===v){cell(i,j)?.classList.add('conf');cell(r2,c2)?.classList.add('conf');}
+    }
+  }
+}
+
+/* ── Numpad ─────────────────────────────────────────────────────── */
+const pad = document.getElementById('numpad');
+for(let n=1;n<=9;n++) {
+  const b=document.createElement('button');
+  b.className='num-btn'; b.textContent=n; b.dataset.n=n;
+  b.onclick=()=>{ if(selR>=0&&selC>=0) place(selR,selC,String(n)); };
+  pad.appendChild(b);
+}
+function updatePad() {
+  const counts=Array(10).fill(0);
+  for(let i=0;i<9;i++) for(let j=0;j<9;j++) {
+    const v=parseInt(inp(i,j)?.value); if(v>=1&&v<=9) counts[v]++;
+  }
+  pad.querySelectorAll('.num-btn').forEach(b=>{
+    b.classList.toggle('done',counts[+b.dataset.n]>=9);
+  });
+}
+
+/* ── Timer ──────────────────────────────────────────────────────── */
+setInterval(()=>{
+  if(!timerOn) return; timerSec++;
+  const m=Math.floor(timerSec/60),s=timerSec%60;
+  document.getElementById('timer').textContent=`${m}:${String(s).padStart(2,'0')}`;
+},1000);
+
+/* ── Clear ──────────────────────────────────────────────────────── */
+function clearPuzzle() {
+  timerSec=0; timerOn=true;
+  for(let i=0;i<9;i++) for(let j=0;j<9;j++) {
+    const td=cell(i,j),i2=inp(i,j);
+    if(!td.classList.contains('given')){ i2.value=''; }
+    td.classList.remove('conf');
+  }
+  document.getElementById('status-msg').textContent='';
+  document.getElementById('status-err').textContent='';
+  checkConflicts(); updatePad();
+}
+
+/* ── Submit ─────────────────────────────────────────────────────── */
+function openSubmit() {
+  const fn=document.getElementById('firstName').value.trim();
+  const ln=document.getElementById('lastName').value.trim();
+  const em=document.getElementById('email').value.trim();
+  if(!fn||!ln||!em) {
+    document.getElementById('status-err').textContent=
+      '⚠ Please enter your name and email before submitting.';
+    document.getElementById('firstName').focus();
+    return;
+  }
+  if(!/\S+@\S+\.\S+/.test(em)) {
+    document.getElementById('status-err').textContent='⚠ Please enter a valid email address.';
+    return;
+  }
+  document.getElementById('status-err').textContent='';
+  scoreAndSubmit(fn, ln, em);
+}
+
+async function scoreAndSubmit(fn, ln, em) {
+  timerOn = false;
+  const chapter = document.getElementById('chapter').value.trim();
+  const m=Math.floor(timerSec/60),s=timerSec%60;
+  const timeStr=`${m}:${String(s).padStart(2,'0')}`;
+
+  // Collect player answers
+  const answers = [];
+  for(let r=0;r<9;r++) {
+    const row=[];
+    for(let c=0;c<9;c++) row.push(parseInt(inp(r,c)?.value)||0);
+    answers.push(row);
+  }
+
+  // Score by verifying each non-given cell against hashes
+  let correct=0, wrong=0, empty=0, totalNonGiven=0;
+  const cellResults = [];
+
+  for(let r=0;r<9;r++) {
+    const cr=[];
+    for(let c=0;c<9;c++) {
+      if(PUZZLE[r][c]!==0) { cr.push('given'); continue; }
+      totalNonGiven++;
+      const v=answers[r][c];
+      if(!v) { empty++; cr.push('empty'); continue; }
+      const ok = await verifyCell(r,c,v);
+      if(ok) { correct++; cr.push('correct'); }
+      else   { wrong++;   cr.push('wrong'); }
+    }
+    cellResults.push(cr);
+  }
+
+  const pct     = Math.round((correct/totalNonGiven)*100);
+  const perfect = correct===totalNonGiven && empty===0;
+  const timestamp = new Date().toISOString();
+
+  resultData = {
+    timestamp,
+    firstName:fn, lastName:ln, email:em, chapter:chapter||'N/A',
+    timeElapsed:timeStr,
+    totalCells:totalNonGiven,
+    correct, wrong, empty,
+    accuracy: pct + '%',
+    status: perfect ? 'WINNER' : (pct>=80?'PASS':'INCOMPLETE'),
+    answers: answers.map(r=>r.join('')).join('|'),
+    puzzleId:'PBS-SIGMA-SUDOKU-2024'
+  };
+
+  // Show modal
+  const modal=document.getElementById('modal');
+  document.getElementById('modal-title').textContent =
+    perfect ? '🏆 Congratulations!' : pct>=80 ? '✅ Good Effort!' : '📋 Result Recorded';
+  document.getElementById('modal-score').textContent = pct + '%';
+  document.getElementById('modal-detail').innerHTML =
+    `<strong>${correct}</strong> correct &nbsp;|&nbsp; `+
+    `<strong>${wrong}</strong> incorrect &nbsp;|&nbsp; `+
+    `<strong>${empty}</strong> empty<br>`+
+    `Time: <strong>${timeStr}</strong> &nbsp;|&nbsp; `+
+    `Status: <strong style="color:#003087">${resultData.status}</strong>`;
+  document.getElementById('modal-msg').textContent =
+    perfect
+      ? 'You solved the puzzle perfectly! Download your result to submit to the administrator.'
+      : 'Download your result file and send it to your chapter administrator for the leaderboard.';
+  modal.classList.add('open');
+}
+
+function closeModal() {
+  document.getElementById('modal').classList.remove('open');
+  timerOn=true;
+}
+
+/* ── Download result JSON ───────────────────────────────────────── */
+function downloadResult() {
+  if (!resultData) return;
+  const json = JSON.stringify(resultData, null, 2);
+  const blob = new Blob([json],{type:'application/json'});
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href=url;
+  a.download=`PBS_Sudoku_${resultData.lastName}_${resultData.firstName}.json`;
+  document.body.appendChild(a); a.click();
+  document.body.removeChild(a); URL.revokeObjectURL(url);
+}
+
+/* ── Download player puzzle file ─────────────────────────────────── */
+function downloadPlayer() {
+  const html='<!DOCTYPE html>\n'+document.documentElement.outerHTML;
+  const blob=new Blob([html],{type:'text/html;charset=utf-8'});
+  const url =URL.createObjectURL(blob);
+  const a   =document.createElement('a');
+  a.href=url; a.download='PBS_Sudoku_PLAYER.html';
+  document.body.appendChild(a); a.click();
+  document.body.removeChild(a); URL.revokeObjectURL(url);
+}
+
+/* ── Init ───────────────────────────────────────────────────────── */
+select(0,0); inp(0,0)?.focus(); updatePad();
+</script>
+
+
+</body></html>
