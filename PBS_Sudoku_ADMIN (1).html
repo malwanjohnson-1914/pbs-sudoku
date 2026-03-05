@@ -1,0 +1,599 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PBS Sudoku — Admin Leaderboard</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: #f0f2f7;
+  font-family: Georgia, 'Times New Roman', serif;
+  color: #111;
+  min-height: 100vh;
+}
+
+/* ── HEADER ─────────────────────────────────── */
+.hdr {
+  background: #003087; position:relative; overflow:hidden;
+}
+.hdr::before {
+  content:''; position:absolute; top:-40px; right:-40px;
+  width:220px; height:220px;
+  border:40px solid rgba(255,255,255,0.05); border-radius:50%;
+}
+.hdr-inner {
+  max-width:1100px; margin:0 auto;
+  padding:24px 28px 20px; text-align:center;
+  position:relative; z-index:2;
+}
+.hdr-greek {
+  font-size:2.4rem; font-weight:700; color:#fff;
+  letter-spacing:12px; margin-bottom:5px;
+}
+.hdr-name {
+  font-size:.95rem; font-weight:700; color:rgba(255,255,255,.9);
+  letter-spacing:4px; text-transform:uppercase; margin-bottom:3px;
+}
+.hdr-tag {
+  font-family:Arial,Helvetica,sans-serif; font-size:.65rem;
+  color:#b3c8f0; letter-spacing:3px; text-transform:uppercase;
+}
+.admin-badge {
+  display:inline-block; background:#fff; color:#003087;
+  font-family:Arial,Helvetica,sans-serif; font-size:.6rem;
+  font-weight:700; letter-spacing:2px; text-transform:uppercase;
+  padding:3px 12px; border-radius:2px; margin-top:10px;
+}
+
+/* ── TITLE BAR ──────────────────────────────── */
+.title-bar {
+  background:#1a1a1a; padding:10px 24px;
+  display:flex; align-items:center; justify-content:space-between;
+  flex-wrap:wrap; gap:8px;
+}
+.title-bar-left {
+  font-family:Arial,Helvetica,sans-serif; font-size:.7rem;
+  font-weight:700; color:#fff; letter-spacing:5px; text-transform:uppercase;
+}
+.title-bar-right {
+  font-family:Arial,Helvetica,sans-serif; font-size:.65rem;
+  color:#888; letter-spacing:1px;
+}
+
+/* ── PAGE ───────────────────────────────────── */
+.page { max-width:1100px; margin:0 auto; padding:28px 24px 60px; }
+
+/* ── STATS STRIP ────────────────────────────── */
+.stats-strip {
+  display:flex; gap:16px; flex-wrap:wrap;
+  margin-bottom:26px;
+}
+.stat-card {
+  flex:1 1 120px; background:#fff;
+  border:2px solid #e0e4ee; border-radius:4px;
+  padding:14px 16px; text-align:center;
+  border-top:4px solid #003087;
+}
+.stat-val {
+  font-family:Georgia,serif; font-size:2rem; font-weight:700;
+  color:#003087; display:block; line-height:1;
+}
+.stat-lbl {
+  font-family:Arial,Helvetica,sans-serif; font-size:.62rem;
+  font-weight:700; letter-spacing:2px; text-transform:uppercase;
+  color:#888; margin-top:5px; display:block;
+}
+
+/* ── UPLOAD ZONE ────────────────────────────── */
+.upload-zone {
+  background:#fff; border:3px dashed #003087;
+  border-radius:4px; padding:30px 20px; text-align:center;
+  margin-bottom:26px; cursor:pointer;
+  transition:background .15s;
+  position:relative;
+}
+.upload-zone:hover, .upload-zone.drag { background:#eef1f8; }
+.upload-zone h3 {
+  font-family:Arial,Helvetica,sans-serif; font-size:.8rem;
+  font-weight:700; letter-spacing:3px; text-transform:uppercase;
+  color:#003087; margin-bottom:8px;
+}
+.upload-zone p {
+  font-family:Arial,Helvetica,sans-serif; font-size:.75rem;
+  color:#666; line-height:1.5;
+}
+.upload-zone input[type=file] {
+  position:absolute; inset:0; width:100%; height:100%;
+  opacity:0; cursor:pointer;
+}
+.upload-icon {
+  font-size:2.5rem; display:block; margin-bottom:10px;
+}
+
+/* ── TOOLBAR ────────────────────────────────── */
+.toolbar {
+  display:flex; gap:10px; flex-wrap:wrap;
+  align-items:center; margin-bottom:20px;
+}
+.tb-btn {
+  padding:9px 20px;
+  font-family:Arial,Helvetica,sans-serif; font-size:.68rem;
+  font-weight:700; letter-spacing:2px; text-transform:uppercase;
+  border:2px solid; border-radius:2px; cursor:pointer;
+  transition:background .12s;
+}
+.btn-csv  { background:#003087; color:#fff; border-color:#003087; }
+.btn-csv:hover  { background:#0040b0; }
+.btn-clr  { background:#fff; color:#555; border-color:#888; }
+.btn-clr:hover  { background:#f5f5f5; }
+.btn-print { background:#fff; color:#003087; border-color:#003087; }
+.btn-print:hover { background:#eef1f8; }
+
+.search-box {
+  margin-left:auto; display:flex; gap:0;
+}
+.search-box input {
+  border:2px solid #ccc; border-right:none; border-radius:2px 0 0 2px;
+  padding:8px 12px; font-family:Arial,sans-serif; font-size:.75rem;
+  outline:none; width:200px;
+}
+.search-box input:focus { border-color:#003087; }
+.search-box span {
+  background:#003087; color:#fff; padding:8px 12px;
+  border-radius:0 2px 2px 0; font-size:.85rem; cursor:default;
+}
+
+/* ── LEADERBOARD TABLE ──────────────────────── */
+.table-wrap {
+  overflow-x:auto; background:#fff;
+  border:2px solid #e0e4ee; border-radius:4px;
+  box-shadow:3px 3px 0 rgba(0,48,135,.12);
+}
+
+table.lb {
+  width:100%; border-collapse:collapse; min-width:700px;
+}
+table.lb thead tr {
+  background:#003087; color:#fff;
+}
+table.lb thead th {
+  font-family:Arial,Helvetica,sans-serif; font-size:.65rem;
+  font-weight:700; letter-spacing:2px; text-transform:uppercase;
+  padding:13px 14px; text-align:left; cursor:pointer;
+  user-select:none; white-space:nowrap;
+}
+table.lb thead th:hover { background:#0040b0; }
+table.lb thead th.sorted { background:#0040b0; }
+table.lb thead th .sort-arrow { margin-left:5px; opacity:.7; }
+
+table.lb tbody tr {
+  border-bottom:1px solid #eee; transition:background .1s;
+}
+table.lb tbody tr:hover { background:#f5f8ff; }
+table.lb tbody tr.winner-row { background:#eef8ee; }
+table.lb tbody tr.winner-row:hover { background:#dff0df; }
+
+table.lb tbody td {
+  font-family:Arial,Helvetica,sans-serif; font-size:.78rem;
+  color:#333; padding:11px 14px; vertical-align:middle;
+}
+
+.rank-cell {
+  font-family:Georgia,serif; font-size:1rem;
+  font-weight:700; color:#003087; text-align:center;
+  min-width:40px;
+}
+.rank-1 { color:#b8860b; font-size:1.2rem; }
+.rank-2 { color:#888; }
+.rank-3 { color:#cd7f32; }
+
+.name-cell { font-weight:700; color:#111; }
+.chapter-cell { color:#666; font-style:italic; }
+
+.acc-cell { font-weight:700; text-align:center; }
+.acc-high  { color:#1a7a1a; }
+.acc-mid   { color:#8a5c00; }
+.acc-low   { color:#b30000; }
+
+.status-pill {
+  display:inline-block; padding:3px 10px; border-radius:12px;
+  font-size:.62rem; font-weight:700; letter-spacing:1px;
+  text-transform:uppercase;
+}
+.pill-winner { background:#003087; color:#fff; }
+.pill-pass   { background:#e8f5e8; color:#1a7a1a; border:1px solid #b8d8b8; }
+.pill-incomplete { background:#fff3cd; color:#7a5c00; border:1px solid #e6c200; }
+
+.time-cell { text-align:center; font-family:Georgia,serif; color:#003087; }
+.date-cell { color:#888; font-size:.7rem; }
+
+.del-btn {
+  background:none; border:none; cursor:pointer;
+  color:#ccc; font-size:.9rem; transition:color .12s; padding:2px 6px;
+}
+.del-btn:hover { color:#b30000; }
+
+/* ── EMPTY STATE ────────────────────────────── */
+.empty-state {
+  text-align:center; padding:50px 20px; color:#aaa;
+}
+.empty-state .big { font-size:3rem; display:block; margin-bottom:12px; }
+.empty-state p {
+  font-family:Arial,Helvetica,sans-serif; font-size:.8rem; line-height:1.6;
+}
+
+/* ── FOOTER ─────────────────────────────────── */
+.site-footer {
+  background:#003087; text-align:center; padding:14px;
+}
+.site-footer p {
+  font-family:Arial,Helvetica,sans-serif; font-size:.62rem;
+  color:rgba(255,255,255,.5); letter-spacing:3px; text-transform:uppercase;
+}
+
+@media print {
+  .upload-zone, .toolbar, .del-btn { display:none; }
+  body { background:#fff; }
+}
+</style>
+</head>
+<body>
+
+<!-- HEADER -->
+<header class="hdr">
+  <div class="hdr-inner">
+    <div class="hdr-greek">&#934; &#914; &#931;</div>
+    <div class="hdr-name">Phi Beta Sigma Fraternity, Inc.</div>
+    <div class="hdr-tag">Sudoku Challenge &mdash; Results Dashboard</div>
+    <div><span class="admin-badge">&#128272; Administrator View</span></div>
+  </div>
+</header>
+<div class="title-bar">
+  <div class="title-bar-left">Leaderboard</div>
+  <div class="title-bar-right" id="last-updated">No submissions loaded</div>
+</div>
+
+<!-- PAGE -->
+<div class="page">
+
+  <!-- Stats Strip -->
+  <div class="stats-strip">
+    <div class="stat-card">
+      <span class="stat-val" id="stat-total">0</span>
+      <span class="stat-lbl">Total Entries</span>
+    </div>
+    <div class="stat-card">
+      <span class="stat-val" id="stat-winners">0</span>
+      <span class="stat-lbl">Winners (100%)</span>
+    </div>
+    <div class="stat-card">
+      <span class="stat-val" id="stat-pass">0</span>
+      <span class="stat-lbl">Passing (&ge;80%)</span>
+    </div>
+    <div class="stat-card">
+      <span class="stat-val" id="stat-avg">—</span>
+      <span class="stat-lbl">Avg. Accuracy</span>
+    </div>
+    <div class="stat-card">
+      <span class="stat-val" id="stat-best">—</span>
+      <span class="stat-lbl">Best Time</span>
+    </div>
+  </div>
+
+  <!-- Upload Zone -->
+  <div class="upload-zone" id="drop-zone">
+    <span class="upload-icon">&#128229;</span>
+    <h3>Load Player Result Files</h3>
+    <p>
+      Click to browse or drag &amp; drop one or more<br>
+      <strong>PBS_Sudoku_[Name].json</strong> result files here.<br>
+      Files players download after submitting their puzzle.
+    </p>
+    <input type="file" id="file-input" accept=".json" multiple>
+  </div>
+
+  <!-- Toolbar -->
+  <div class="toolbar">
+    <button class="tb-btn btn-csv"   onclick="exportCSV()">&#11123; Export CSV</button>
+    <button class="tb-btn btn-print" onclick="window.print()">&#128438; Print</button>
+    <button class="tb-btn btn-clr"   onclick="clearAll()">&#8635; Clear All</button>
+    <div class="search-box">
+      <input type="text" id="search" placeholder="Search by name, email…" oninput="renderTable()">
+      <span>&#128269;</span>
+    </div>
+  </div>
+
+  <!-- Table -->
+  <div class="table-wrap">
+    <table class="lb">
+      <thead>
+        <tr>
+          <th onclick="sortBy('rank')"    class="sorted">Rank <span class="sort-arrow">&#9650;</span></th>
+          <th onclick="sortBy('name')">Name <span class="sort-arrow"></span></th>
+          <th onclick="sortBy('chapter')">Membership No. <span class="sort-arrow"></span></th>
+          <th onclick="sortBy('email')">Email <span class="sort-arrow"></span></th>
+          <th onclick="sortBy('accuracy')">Accuracy <span class="sort-arrow"></span></th>
+          <th onclick="sortBy('correct')">Correct <span class="sort-arrow"></span></th>
+          <th onclick="sortBy('wrong')">Wrong <span class="sort-arrow"></span></th>
+          <th onclick="sortBy('time')">Time <span class="sort-arrow"></span></th>
+          <th onclick="sortBy('status')">Status <span class="sort-arrow"></span></th>
+          <th onclick="sortBy('date')">Submitted <span class="sort-arrow"></span></th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="lb-body"></tbody>
+    </table>
+  </div>
+
+</div>
+
+<footer class="site-footer">
+  <p>PBS Sudoku Admin &bull; Founded 1914 &bull; Howard University &bull; Washington, D.C.</p>
+</footer>
+
+<script>
+/* ════════════════════════════════════════════════════════════════
+   ADMIN DASHBOARD STATE
+════════════════════════════════════════════════════════════════ */
+let submissions = JSON.parse(localStorage.getItem('pbs_sudoku_results') || '[]');
+let sortField = 'rank';
+let sortAsc   = true;
+
+/* ── File input ─────────────────────────────────────────────────── */
+const fileInput = document.getElementById('file-input');
+const dropZone  = document.getElementById('drop-zone');
+
+fileInput.addEventListener('change', e => loadFiles(e.target.files));
+
+dropZone.addEventListener('dragover',  e => { e.preventDefault(); dropZone.classList.add('drag'); });
+dropZone.addEventListener('dragleave', ()  => dropZone.classList.remove('drag'));
+dropZone.addEventListener('drop', e => {
+  e.preventDefault(); dropZone.classList.remove('drag');
+  loadFiles(e.dataTransfer.files);
+});
+
+function loadFiles(files) {
+  let loaded = 0;
+  Array.from(files).forEach(file => {
+    if (!file.name.endsWith('.json')) return;
+    const reader = new FileReader();
+    reader.onload = evt => {
+      try {
+        const data = JSON.parse(evt.target.result);
+        if (!data.email || !data.firstName) return;
+        // Deduplicate by email+timestamp
+        const key = data.email + data.timestamp;
+        if (!submissions.find(s => s.email+s.timestamp === key)) {
+          submissions.push(data);
+          loaded++;
+        }
+        save(); renderAll();
+        document.getElementById('last-updated').textContent =
+          `Last updated: ${new Date().toLocaleString()} — ${loaded} new file(s) loaded`;
+      } catch(e) { alert('Invalid file: ' + file.name); }
+    };
+    reader.readAsText(file);
+  });
+}
+
+/* ── Sort ───────────────────────────────────────────────────────── */
+function sortBy(field) {
+  if (sortField === field) sortAsc = !sortAsc;
+  else { sortField = field; sortAsc = true; }
+  // Update header arrows
+  document.querySelectorAll('.lb thead th').forEach(th => {
+    th.classList.remove('sorted');
+    const arrow = th.querySelector('.sort-arrow');
+    if (arrow) arrow.textContent = '';
+  });
+  const idx = ['rank','name','chapter','email','accuracy','correct','wrong','time','status','date'];
+  const th  = document.querySelectorAll('.lb thead th')[idx.indexOf(field)];
+  if (th) {
+    th.classList.add('sorted');
+    const arrow = th.querySelector('.sort-arrow');
+    if (arrow) arrow.textContent = sortAsc ? '▲' : '▼';
+  }
+  renderTable();
+}
+
+function getSortValue(s, field) {
+  switch(field) {
+    case 'rank':
+    case 'accuracy': return -parseInt(s.accuracy);
+    case 'name':     return (s.lastName+s.firstName).toLowerCase();
+    case 'chapter':  return (s.membershipNumber||s.chapter||'').toLowerCase();
+    case 'email':    return s.email.toLowerCase();
+    case 'correct':  return -s.correct;
+    case 'wrong':    return s.wrong;
+    case 'time': {
+      const [m,sec] = s.timeElapsed.split(':').map(Number);
+      return m*60+sec;
+    }
+    case 'status':   return s.status==='WINNER'?0:s.status==='PASS'?1:2;
+    case 'date':     return new Date(s.timestamp).getTime();
+    default:         return 0;
+  }
+}
+
+/* ── Search & render ────────────────────────────────────────────── */
+function renderAll() {
+  renderStats();
+  renderTable();
+}
+
+function renderStats() {
+  const n = submissions.length;
+  const winners = submissions.filter(s=>s.status==='WINNER').length;
+  const pass    = submissions.filter(s=>s.status==='PASS').length;
+  const accs    = submissions.map(s=>parseInt(s.accuracy));
+  const avg     = n ? Math.round(accs.reduce((a,b)=>a+b,0)/n) : null;
+
+  // Best time = fastest among winners, else all
+  const ref = submissions.filter(s=>s.status==='WINNER').length
+    ? submissions.filter(s=>s.status==='WINNER')
+    : submissions;
+  const best = ref.length ? ref.reduce((a,b)=>{
+    const ts = t=>{ const [m,s]=t.timeElapsed.split(':').map(Number); return m*60+s; };
+    return ts(a)<ts(b)?a:b;
+  }) : null;
+
+  document.getElementById('stat-total').textContent   = n;
+  document.getElementById('stat-winners').textContent = winners;
+  document.getElementById('stat-pass').textContent    = pass;
+  document.getElementById('stat-avg').textContent     = avg!==null ? avg+'%' : '—';
+  document.getElementById('stat-best').textContent    = best ? best.timeElapsed : '—';
+}
+
+function renderTable() {
+  const q = document.getElementById('search').value.toLowerCase();
+  let data = submissions.filter(s =>
+    !q ||
+    (s.firstName+' '+s.lastName).toLowerCase().includes(q) ||
+    s.email.toLowerCase().includes(q) ||
+    (s.membershipNumber||s.chapter||'').toLowerCase().includes(q)
+  );
+
+  // Sort by accuracy desc first, then time asc for ranking
+  data.sort((a,b) => {
+    const aAcc=parseInt(a.accuracy), bAcc=parseInt(b.accuracy);
+    if (aAcc !== bAcc) return bAcc - aAcc;
+    const ts = t=>{ const [m,s]=t.split(':').map(Number); return m*60+s; };
+    return ts(a.timeElapsed) - ts(b.timeElapsed);
+  });
+
+  // Assign ranks
+  data.forEach((s,i) => s._rank = i+1);
+
+  // Re-sort by user's chosen column if different
+  if (!['rank','accuracy'].includes(sortField)) {
+    data.sort((a,b) => {
+      const av=getSortValue(a,sortField), bv=getSortValue(b,sortField);
+      if (av<bv) return sortAsc?-1:1;
+      if (av>bv) return sortAsc?1:-1;
+      return 0;
+    });
+  } else {
+    if (!sortAsc) data.reverse();
+  }
+
+  const tbody = document.getElementById('lb-body');
+  if (!data.length) {
+    tbody.innerHTML = `<tr><td colspan="11">
+      <div class="empty-state">
+        <span class="big">📭</span>
+        <p>No submissions loaded yet.<br>
+        Upload player result <strong>.json</strong> files above to populate the leaderboard.</p>
+      </div>
+    </td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = '';
+  data.forEach(s => {
+    const acc   = parseInt(s.accuracy);
+    const isWin = s.status === 'WINNER';
+    const tr    = document.createElement('tr');
+    if (isWin) tr.classList.add('winner-row');
+
+    const rankClass = s._rank===1?'rank-1':s._rank===2?'rank-2':s._rank===3?'rank-3':'';
+    const rankIcon  = s._rank===1?'🥇':s._rank===2?'🥈':s._rank===3?'🥉':'';
+    const accClass  = acc>=80?'acc-high':acc>=50?'acc-mid':'acc-low';
+    const pillCls   = s.status==='WINNER'?'pill-winner':s.status==='PASS'?'pill-pass':'pill-incomplete';
+    const dateStr   = new Date(s.timestamp).toLocaleDateString('en-US',
+      {month:'short',day:'numeric',year:'numeric',hour:'2-digit',minute:'2-digit'});
+
+    tr.innerHTML = `
+      <td class="rank-cell ${rankClass}">${rankIcon||('#'+s._rank)}</td>
+      <td class="name-cell">${esc(s.lastName)}, ${esc(s.firstName)}</td>
+      <td class="chapter-cell">${esc(s.membershipNumber||s.chapter||'N/A')}</td>
+      <td>${esc(s.email)}</td>
+      <td class="acc-cell ${accClass}">${s.accuracy}</td>
+      <td style="text-align:center;color:#1a7a1a;font-weight:700">${s.correct}</td>
+      <td style="text-align:center;color:#b30000;font-weight:700">${s.wrong}</td>
+      <td class="time-cell">${esc(s.timeElapsed)}</td>
+      <td><span class="status-pill ${pillCls}">${s.status}</span></td>
+      <td class="date-cell">${dateStr}</td>
+      <td><button class="del-btn" title="Remove entry"
+          onclick="removeEntry('${s.email}','${s.timestamp}')">&#10005;</button></td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
+function esc(str) {
+  return String(str||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+/* ── Remove entry ───────────────────────────────────────────────── */
+function removeEntry(email, ts) {
+  if (!confirm('Remove this submission from the leaderboard?')) return;
+  submissions = submissions.filter(s => !(s.email===email && s.timestamp===ts));
+  save(); renderAll();
+}
+
+/* ── Clear all ──────────────────────────────────────────────────── */
+function clearAll() {
+  if (!confirm('Clear ALL submissions? This cannot be undone.')) return;
+  submissions = [];
+  save(); renderAll();
+  document.getElementById('last-updated').textContent = 'No submissions loaded';
+}
+
+/* ── Save to localStorage ───────────────────────────────────────── */
+function save() {
+  try { localStorage.setItem('pbs_sudoku_results', JSON.stringify(submissions)); }
+  catch(e) { /* storage full, ignore */ }
+}
+
+/* ── Export CSV ─────────────────────────────────────────────────── */
+function exportCSV() {
+  if (!submissions.length) { alert('No submissions to export.'); return; }
+
+  // Sort by accuracy desc, then time asc
+  const sorted = [...submissions].sort((a,b) => {
+    const aAcc=parseInt(a.accuracy), bAcc=parseInt(b.accuracy);
+    if (aAcc!==bAcc) return bAcc-aAcc;
+    const ts=t=>{const[m,s]=t.split(':').map(Number);return m*60+s;};
+    return ts(a.timeElapsed)-ts(b.timeElapsed);
+  });
+
+  const headers = [
+    'Rank','Status','First Name','Last Name','Email','Membership Number',
+    'Accuracy','Correct Cells','Wrong Cells','Empty Cells',
+    'Total Non-Given Cells','Time Elapsed','Submitted At','Puzzle ID'
+  ];
+
+  const rows = sorted.map((s,i) => [
+    i+1,
+    s.status,
+    s.firstName, s.lastName, s.email,
+    s.membershipNumber||s.chapter||'N/A',
+    s.accuracy,
+    s.correct, s.wrong, s.empty,
+    s.totalCells,
+    s.timeElapsed,
+    new Date(s.timestamp).toLocaleString(),
+    s.puzzleId||'PBS-SIGMA-SUDOKU-2024'
+  ].map(v => `"${String(v).replace(/"/g,'""')}"`).join(','));
+
+  const csv  = [headers.join(','), ...rows].join('\n');
+  const blob = new Blob([csv], {type:'text/csv;charset=utf-8'});
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href=url;
+  a.download=`PBS_Sudoku_Leaderboard_${new Date().toISOString().slice(0,10)}.csv`;
+  document.body.appendChild(a); a.click();
+  document.body.removeChild(a); URL.revokeObjectURL(url);
+}
+
+/* ── Init ───────────────────────────────────────────────────────── */
+renderAll();
+if (submissions.length) {
+  document.getElementById('last-updated').textContent =
+    `${submissions.length} submission(s) loaded from local storage`;
+}
+</script>
+</body>
+</html>
